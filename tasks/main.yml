@@ -1,31 +1,36 @@
 ---
-- name: Installer dependances de base
-  ansible.builtin.package:
-    name:
-      - curl
-      - ca-certificates
-    state: present
-
-- name: Verifier la presence de Docker
+- name: Verifier la presence de Docker CLI
   ansible.builtin.command: docker --version
   changed_when: false
 
-- name: Verifier si k3d est deja installe
-  ansible.builtin.command: k3d version
-  register: k3d_check
+- name: Verifier l'acces au daemon Docker
+  ansible.builtin.command: docker info
+  changed_when: false
+
+- name: Creer le dossier des outils locaux
+  ansible.builtin.file:
+    path: "{{ k3d_tools_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Verifier si k3d est disponible dans le PATH
+  ansible.builtin.shell: command -v k3d
+  register: k3d_in_path
   changed_when: false
   failed_when: false
 
-- name: Telecharger le script d'installation k3d
-  ansible.builtin.get_url:
-    url: https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh
-    dest: /tmp/install-k3d.sh
-    mode: "0755"
-  when: k3d_check.rc != 0
+- name: Installer k3d localement si absent
+  ansible.builtin.shell: |
+    curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | USE_SUDO=false K3D_INSTALL_DIR={{ k3d_tools_dir }} bash
+  args:
+    creates: "{{ k3d_tools_dir }}/k3d"
+  when: k3d_in_path.rc != 0
 
-- name: Installer k3d
-  ansible.builtin.command: /tmp/install-k3d.sh
-  when: k3d_check.rc != 0
+- name: Verifier si kubectl est disponible dans le PATH
+  ansible.builtin.shell: command -v kubectl
+  register: kubectl_in_path
+  changed_when: false
+  failed_when: false
 
 - name: Recuperer la version stable de kubectl
   ansible.builtin.uri:
@@ -33,23 +38,28 @@
     return_content: true
   register: kubectl_stable
   changed_when: false
+  when: kubectl_in_path.rc != 0
 
-- name: Installer kubectl
+- name: Installer kubectl localement si absent
   ansible.builtin.get_url:
     url: "https://dl.k8s.io/release/{{ kubectl_stable.content | trim }}/bin/linux/amd64/kubectl"
-    dest: /usr/local/bin/kubectl
+    dest: "{{ k3d_tools_dir }}/kubectl"
     mode: "0755"
+  when: kubectl_in_path.rc != 0
 
-- name: Verifier si le cluster existe deja
-  ansible.builtin.command: k3d cluster list -o simple
-  register: k3d_clusters
+- name: Definir les commandes k3d/kubectl effectives
+  ansible.builtin.set_fact:
+    k3d_cmd: "{{ 'k3d' if k3d_in_path.rc == 0 else (k3d_tools_dir + '/k3d') }}"
+    kubectl_cmd: "{{ 'kubectl' if kubectl_in_path.rc == 0 else (k3d_tools_dir + '/kubectl') }}"
+
+- name: Recuperer la liste des clusters k3d en JSON
+  ansible.builtin.command: "{{ k3d_cmd }} cluster list -o json"
+  register: k3d_clusters_json
   changed_when: false
 
-- name: Creer le cluster k3d
-  ansible.builtin.command: >-
-    k3d cluster create {{ k3d_cluster_name }} --servers 1 --agents 1
-    -p {{ k3d_nodeport }}:{{ k3d_nodeport }}@agent:0 --wait
-  when: k3d_cluster_name not in k3d_clusters.stdout_lines
+- name: Creer le cluster k3d (1 serveur, 1 agent)
+  ansible.builtin.command: "{{ k3d_cmd }} cluster create {{ k3d_cluster_name }} --servers 1 --agents 1 -p {{ k3d_nodeport }}:{{ k3d_nodeport }}@loadbalancer --wait"
+  when: k3d_cluster_name not in (k3d_clusters_json.stdout | from_json | map(attribute='name') | list)
 
 - name: Generer le manifest nginx
   ansible.builtin.template:
@@ -57,12 +67,27 @@
     dest: "{{ k3d_manifest_path }}"
     mode: "0644"
 
-- name: Appliquer le manifest
-  ansible.builtin.command: kubectl apply -f {{ k3d_manifest_path }}
-
-- name: Attendre que le deployment soit pret
-  ansible.builtin.command: kubectl rollout status deployment/nginx-custom --timeout=120s
+- name: Ecrire/actualiser le kubeconfig du cluster
+  ansible.builtin.command: "{{ k3d_cmd }} kubeconfig write {{ k3d_cluster_name }}"
+  register: kubeconfig_write
   changed_when: false
+
+- name: Definir le kubeconfig a utiliser
+  ansible.builtin.set_fact:
+    kubectl_kubeconfig: "{{ kubeconfig_write.stdout | trim if (kubeconfig_write.stdout | trim | length) > 0 else k3d_kubeconfig_path }}"
+
+- name: Appliquer le manifest kubernetes
+  ansible.builtin.command: "{{ kubectl_cmd }} apply -f {{ k3d_manifest_path }}"
+  register: kubectl_apply
+  changed_when: "' created' in kubectl_apply.stdout or ' configured' in kubectl_apply.stdout"
+  environment:
+    KUBECONFIG: "{{ kubectl_kubeconfig }}"
+
+- name: Attendre que le deployment nginx soit pret
+  ansible.builtin.command: "{{ kubectl_cmd }} rollout status deployment/nginx-custom --timeout=120s"
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ kubectl_kubeconfig }}"
 
 - name: Afficher l'URL d'acces
   ansible.builtin.debug:

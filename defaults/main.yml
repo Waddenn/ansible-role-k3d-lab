@@ -1,5 +1,7 @@
 ---
 k3d_cluster_name: k3d-lab
 k3d_manifest_path: /tmp/nginx.yaml
+k3d_tools_dir: "{{ lookup('env', 'HOME') ~ '/.local/bin' }}"
+k3d_kubeconfig_path: "{{ lookup('env', 'HOME') ~ '/.config/k3d/kubeconfig-' ~ k3d_cluster_name ~ '.yaml' }}"
 k3d_nodeport: 30080
 k3d_welcome_message: "Bienvenue dans le k3d LAB"
