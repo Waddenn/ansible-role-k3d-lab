@@ -24,7 +24,22 @@
     curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | USE_SUDO=false K3D_INSTALL_DIR={{ k3d_tools_dir }} bash
   args:
     creates: "{{ k3d_tools_dir }}/k3d"
+  register: k3d_install
+  failed_when: false
   when: k3d_in_path.rc != 0
+
+- name: Verifier la presence du binaire k3d local
+  ansible.builtin.stat:
+    path: "{{ k3d_tools_dir }}/k3d"
+  register: k3d_local_bin
+  when: k3d_in_path.rc != 0
+
+- name: Echouer si k3d n'est pas disponible
+  ansible.builtin.fail:
+    msg: "k3d introuvable apres tentative d'installation"
+  when:
+    - k3d_in_path.rc != 0
+    - not k3d_local_bin.stat.exists
 
 - name: Verifier si kubectl est disponible dans le PATH
   ansible.builtin.shell: command -v kubectl
@@ -76,18 +91,46 @@
   ansible.builtin.set_fact:
     kubectl_kubeconfig: "{{ kubeconfig_write.stdout | trim if (kubeconfig_write.stdout | trim | length) > 0 else k3d_kubeconfig_path }}"
 
+- name: Definir le kubeconfig runtime
+  ansible.builtin.set_fact:
+    kubectl_kubeconfig_runtime: "{{ kubectl_kubeconfig }}"
+    kubectl_tls_args: ""
+
+- name: Adapter le kubeconfig pour execution depuis conteneur Docker
+  ansible.builtin.copy:
+    src: "{{ kubectl_kubeconfig }}"
+    dest: /tmp/kubeconfig-k3d-runtime.yaml
+    mode: "0600"
+    remote_src: true
+  changed_when: false
+  when: ansible_virtualization_type == "docker"
+
+- name: Remplacer 0.0.0.0 par host.docker.internal dans le kubeconfig runtime
+  ansible.builtin.replace:
+    path: /tmp/kubeconfig-k3d-runtime.yaml
+    regexp: 'https://0\.0\.0\.0:'
+    replace: 'https://host.docker.internal:'
+  changed_when: false
+  when: ansible_virtualization_type == "docker"
+
+- name: Utiliser le kubeconfig runtime adapte
+  ansible.builtin.set_fact:
+    kubectl_kubeconfig_runtime: /tmp/kubeconfig-k3d-runtime.yaml
+    kubectl_tls_args: "--insecure-skip-tls-verify=true"
+  when: ansible_virtualization_type == "docker"
+
 - name: Appliquer le manifest kubernetes
-  ansible.builtin.command: "{{ kubectl_cmd }} apply -f {{ k3d_manifest_path }}"
+  ansible.builtin.command: "{{ kubectl_cmd }} {{ kubectl_tls_args }} apply -f {{ k3d_manifest_path }}"
   register: kubectl_apply
   changed_when: "' created' in kubectl_apply.stdout or ' configured' in kubectl_apply.stdout"
   environment:
-    KUBECONFIG: "{{ kubectl_kubeconfig }}"
+    KUBECONFIG: "{{ kubectl_kubeconfig_runtime }}"
 
 - name: Attendre que le deployment nginx soit pret
-  ansible.builtin.command: "{{ kubectl_cmd }} rollout status deployment/nginx-custom --timeout=120s"
+  ansible.builtin.command: "{{ kubectl_cmd }} {{ kubectl_tls_args }} rollout status deployment/nginx-custom --timeout=120s"
   changed_when: false
   environment:
-    KUBECONFIG: "{{ kubectl_kubeconfig }}"
+    KUBECONFIG: "{{ kubectl_kubeconfig_runtime }}"
 
 - name: Afficher l'URL d'acces
   ansible.builtin.debug:
