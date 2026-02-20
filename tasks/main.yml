@@ -1,0 +1,69 @@
+---
+- name: Installer dependances de base
+  ansible.builtin.package:
+    name:
+      - curl
+      - ca-certificates
+    state: present
+
+- name: Verifier la presence de Docker
+  ansible.builtin.command: docker --version
+  changed_when: false
+
+- name: Verifier si k3d est deja installe
+  ansible.builtin.command: k3d version
+  register: k3d_check
+  changed_when: false
+  failed_when: false
+
+- name: Telecharger le script d'installation k3d
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh
+    dest: /tmp/install-k3d.sh
+    mode: "0755"
+  when: k3d_check.rc != 0
+
+- name: Installer k3d
+  ansible.builtin.command: /tmp/install-k3d.sh
+  when: k3d_check.rc != 0
+
+- name: Recuperer la version stable de kubectl
+  ansible.builtin.uri:
+    url: https://dl.k8s.io/release/stable.txt
+    return_content: true
+  register: kubectl_stable
+  changed_when: false
+
+- name: Installer kubectl
+  ansible.builtin.get_url:
+    url: "https://dl.k8s.io/release/{{ kubectl_stable.content | trim }}/bin/linux/amd64/kubectl"
+    dest: /usr/local/bin/kubectl
+    mode: "0755"
+
+- name: Verifier si le cluster existe deja
+  ansible.builtin.command: k3d cluster list -o simple
+  register: k3d_clusters
+  changed_when: false
+
+- name: Creer le cluster k3d
+  ansible.builtin.command: >-
+    k3d cluster create {{ k3d_cluster_name }} --servers 1 --agents 1
+    -p {{ k3d_nodeport }}:{{ k3d_nodeport }}@agent:0 --wait
+  when: k3d_cluster_name not in k3d_clusters.stdout_lines
+
+- name: Generer le manifest nginx
+  ansible.builtin.template:
+    src: nginx.yaml.j2
+    dest: "{{ k3d_manifest_path }}"
+    mode: "0644"
+
+- name: Appliquer le manifest
+  ansible.builtin.command: kubectl apply -f {{ k3d_manifest_path }}
+
+- name: Attendre que le deployment soit pret
+  ansible.builtin.command: kubectl rollout status deployment/nginx-custom --timeout=120s
+  changed_when: false
+
+- name: Afficher l'URL d'acces
+  ansible.builtin.debug:
+    msg: "Service disponible sur http://localhost:{{ k3d_nodeport }}"

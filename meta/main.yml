@@ -1,0 +1,21 @@
+---
+galaxy_info:
+  role_name: k3d_lab
+  author: tom
+  description: Deploie un cluster k3d local et un service NGINX personnalise
+  company: ""
+  license: MIT
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+    - name: Ubuntu
+      versions:
+        - all
+  galaxy_tags:
+    - kubernetes
+    - k3d
+    - nginx
+    - docker
+dependencies: []
